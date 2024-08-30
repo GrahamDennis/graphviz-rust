@@ -395,6 +395,24 @@ pub struct Id<'a> {
     name: Cow<'a, str>,
 }
 
+#[derive(Debug)]
+pub enum IdError<'a> {
+    EmptyName,
+    InvalidStartChar(char, Cow<'a, str>),
+    InvalidChar(char, Cow<'a, str>),
+}
+
+impl<'a> std::fmt::Display for IdError<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IdError::EmptyName => write!(f, "Id cannot be empty"),
+            IdError::InvalidStartChar(c, id) => write!(f, "Id cannot begin with `{c}` (`{id}`)"),
+            IdError::InvalidChar(c, id) => write!(f, "Id cannot contain `{c}` (`{id}`)"),
+        }
+    }
+}
+impl<'a> std::error::Error for IdError<'a> {}
+
 impl<'a> Id<'a> {
     /// Creates an `Id` named `name`.
     ///
@@ -410,19 +428,20 @@ impl<'a> Id<'a> {
     ///
     /// Passing an invalid string (containing spaces, brackets,
     /// quotes, ...) will return an empty `Err` value.
-    pub fn new<Name: Into<Cow<'a, str>>>(name: Name) -> Result<Id<'a>, ()> {
+    pub fn new<Name: Into<Cow<'a, str>>>(name: Name) -> Result<Id<'a>, IdError<'a>> {
         let name = name.into();
         {
             let mut chars = name.chars();
             match chars.next() {
                 Some(c) if is_letter_or_underscore(c) => {}
-                _ => return Err(()),
+                Some(c) => return Err(IdError::InvalidStartChar(c, name)),
+                None => return Err(IdError::EmptyName),
             }
-            if !chars.all(is_constituent) {
-                return Err(())
+            if let Some(bad) = chars.find(|c| !is_constituent(*c)) {
+                return Err(IdError::InvalidChar(bad, name));
             }
         }
-        return Ok(Id{ name: name });
+        return Ok(Id { name });
 
         fn is_letter_or_underscore(c: char) -> bool {
             in_range('a', c, 'z') || in_range('A', c, 'Z') || c == '_'
@@ -436,7 +455,7 @@ impl<'a> Id<'a> {
     }
 
     pub fn as_slice(&'a self) -> &'a str {
-        &*self.name
+        &self.name
     }
 
     pub fn name(self) -> Cow<'a, str> {
@@ -556,10 +575,10 @@ pub trait Labeller<'a,N,E> {
 /// Graphviz HTML label.
 pub fn escape_html(s: &str) -> String {
     s
-        .replace("&", "&amp;")
-        .replace("\"", "&quot;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 impl<'a> LabelText<'a> {
@@ -603,9 +622,9 @@ impl<'a> LabelText<'a> {
     /// This includes quotes or suitable delimeters.
     pub fn to_dot_string(&self) -> String {
         match self {
-            &LabelStr(ref s) => format!("\"{}\"", LabelText::escape_default(s)),
-            &EscStr(ref s) => format!("\"{}\"", LabelText::escape_str(&s[..])),
-            &HtmlStr(ref s) => format!("<{}>", s),
+            LabelStr(s) => format!("\"{}\"", LabelText::escape_default(s)),
+            EscStr(s) => format!("\"{}\"", LabelText::escape_str(&s[..])),
+            HtmlStr(s) => format!("<{}>", s),
         }
     }
 
@@ -617,7 +636,7 @@ impl<'a> LabelText<'a> {
         match self {
             EscStr(s) => s,
             LabelStr(s) => if s.contains('\\') {
-                LabelText::escape_default(&*s).into()
+                LabelText::escape_default(&s).into()
             } else {
                 s
             },
@@ -650,17 +669,19 @@ pub struct Arrow {
 
 use self::ArrowShape::*;
 
+impl Default for Arrow {
+    /// Arrow constructor which returns a default arrow
+    fn default() -> Arrow {
+        Arrow {
+            arrows: vec![],
+        }
+    }
+}
+
 impl Arrow {
     /// Return `true` if this is a default arrow.
     fn is_default(&self) -> bool {
         self.arrows.is_empty()
-    }
-
-    /// Arrow constructor which returns a default arrow
-    pub fn default() -> Arrow {
-        Arrow {
-            arrows: vec![],
-        }
     }
 
     /// Arrow constructor which returns an empty arrow
@@ -689,33 +710,23 @@ impl Arrow {
         let mut cow = String::new();
         for arrow in &self.arrows {
             cow.push_str(&arrow.to_dot_string());
-        };
+        }
         cow
     }
 }
 
-
-impl Into<Arrow> for [ArrowShape; 2] {
-    fn into(self) -> Arrow {
-        Arrow {
-            arrows: vec![self[0], self[1]],
-        }
+macro_rules! arrowshape_to_arrow {
+    ( $($n:expr), * ) => {
+        $(
+            impl From<[ArrowShape; $n]> for Arrow {
+                fn from(shape: [ArrowShape; $n]) -> Arrow {
+                    Arrow {arrows: shape.to_vec() }
+                }
+            }
+        )*
     }
 }
-impl Into<Arrow> for [ArrowShape; 3] {
-    fn into(self) -> Arrow {
-        Arrow {
-            arrows: vec![self[0], self[1], self[2]],
-        }
-    }
-}
-impl Into<Arrow> for [ArrowShape; 4] {
-    fn into(self) -> Arrow {
-        Arrow {
-            arrows: vec![self[0], self[1], self[2], self[3]],
-        }
-    }
-}
+arrowshape_to_arrow!(2, 3, 4);
 
 /// Arrow modifier that determines if the shape is empty or filled.
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
@@ -977,7 +988,7 @@ pub fn render_opts<'a,
         for &s in arg {
             w.write_all(s.as_bytes())?;
         }
-        write!(w, "\n")
+        writeln!(w)
     }
 
     fn indent<W: Write>(w: &mut W) -> io::Result<()> {
